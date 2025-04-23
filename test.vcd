@@ -1,0 +1,11 @@
+$timescale 1 ns $end
+$scope module top $end
+$var wire 1 ! test: 13 $end
+$var wire 1 " lol: 29 $end
+$upscope $end
+$enddefinitions $end
+$dumpvars
+0!
+0"
+$end
+#0

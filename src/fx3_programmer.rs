@@ -1,14 +1,14 @@
 /* this file is adapted from https://github.com/nicholasbishop/cyusb-rs/blob/043496d/src/bin/cyusb_programmer.rs
- * and thus licensed under Apache-2.0. 
+ * and thus licensed under Apache-2.0.
  * It is then adapted from rusb to nusb.
  */
 
 use log::info;
-use nusb::{transfer::{Control, ControlType, Recipient}, Device};
-use std::{
-    array::TryFromSliceError, convert::TryInto, fs, io, path::Path, thread,
-    time::Duration,
+use nusb::{
+    Device,
+    transfer::{Control, ControlType, Recipient},
 };
+use std::{array::TryFromSliceError, convert::TryInto, fs, io, path::Path, thread, time::Duration};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -48,9 +48,7 @@ impl Checksum {
         let mut offset = 0;
         while offset < data.len() {
             let chunk = &data[offset..offset + 4];
-            let val = u32::from_le_bytes(
-                chunk.try_into().map_err(Error::TruncatedData)?,
-            );
+            let val = u32::from_le_bytes(chunk.try_into().map_err(Error::TruncatedData)?);
             self.value = self.value.overflowing_add(val).0;
             offset += 4;
         }
@@ -58,11 +56,7 @@ impl Checksum {
     }
 }
 
-fn write_control(
-    device: &Device,
-    address: u32,
-    data: &[u8],
-) -> Result<usize, Error> {
+fn write_control(device: &Device, address: u32, data: &[u8]) -> Result<usize, Error> {
     let bytes_written = device
         .control_out_blocking(
             Control {
@@ -79,11 +73,7 @@ fn write_control(
     Ok(bytes_written)
 }
 
-fn control_transfer(
-    device: &Device,
-    mut address: u32,
-    data: &[u8],
-) -> Result<(), Error> {
+fn control_transfer(device: &Device, mut address: u32, data: &[u8]) -> Result<(), Error> {
     let mut balance = data.len() as u32;
     let mut offset = 0;
 
@@ -107,10 +97,7 @@ fn control_transfer(
 }
 
 /// Download firmware to RAM on a Cypress FX3
-pub fn program_fx3_ram(
-    device: &Device,
-    path: &Path,
-) -> Result<(), Error> {
+pub fn program_fx3_ram(device: &Device, path: &Path) -> Result<(), Error> {
     // Firmware files should be quite small, so just load the whole
     // thing in memory
     let program = fs::read(path).map_err(Error::IoError)?;
@@ -136,8 +123,7 @@ pub fn program_fx3_ram(
 
     let read_u32 = |offset: &mut usize| {
         let chunk = &program[*offset..*offset + 4];
-        let val =
-            u32::from_le_bytes(chunk.try_into().map_err(Error::TruncatedData)?);
+        let val = u32::from_le_bytes(chunk.try_into().map_err(Error::TruncatedData)?);
         *offset += 4;
         Ok(val)
     };
