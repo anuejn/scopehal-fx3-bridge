@@ -1,16 +1,19 @@
 use clap::{Arg, Command, value_parser};
+use fst_writer::{
+    FstFileType, FstInfo, FstScopeType, FstSignalType, FstVarDirection, FstVarType, open_fst,
+};
 use scopehal_fx_bridge::fx3lafw::{acquisition, setup_device};
 use status_line::StatusLine;
 use std::{
     error::Error,
     fmt::Display,
     path::PathBuf,
+    process::exit,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
-use vcd::{SimulationCommand, TimescaleUnit, Value};
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
@@ -31,7 +34,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .short('s')
                 .long("samplerate")
                 .default_value("48")
-                .value_parser(["48", "96", "192"])
+                .value_parser(["30", "48", "192"])
                 .required(true)
                 .help("Sample rate in MHz"),
         );
@@ -66,6 +69,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let device = setup_device()?;
+    eprintln!(
+        "starting acquisition with {} channels and {} MHz",
+        channels.len(),
+        sample_rate
+    );
     let acquisition = acquisition(&device, sample_rate, channels.len())?;
 
     #[derive(Clone)]
@@ -100,43 +108,58 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let stop_clone = acquisition.stop.clone();
     ctrlc::set_handler(move || {
+        if stop_clone.load(Ordering::Relaxed) {
+            eprintln!("Killing...");
+            exit(-1);
+        }
         stop_clone.store(true, Ordering::Relaxed);
     })?;
 
-    let file = std::fs::File::create(output)?;
-    let mut writer = vcd::Writer::new(file);
+    let info = FstInfo {
+        start_time: 0,
+        timescale_exponent: -9, // ns
+        version: "0.1".to_string(),
+        date: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        file_type: FstFileType::Verilog,
+    };
+    let mut out = open_fst(output, &info).expect("failed to open output");
 
-    // Write the header
-    writer.timescale(1, TimescaleUnit::NS)?;
-    writer.add_module("top")?;
+    out.scope("top", "top", FstScopeType::Module)?;
+
     let mut wires = Vec::new();
     wires.resize(channels.len(), None);
     for (i, name) in channels.iter().enumerate() {
         if let Some(name) = name {
-            let static_str: &'static str = Box::leak(Box::new(format!("{}: {}", name, i)));
-            wires[i] = Some(writer.add_wire(1, static_str)?);
+            let var = out.var(
+                format!("{} ({})", name, i),
+                FstSignalType::bit_vec(1),
+                FstVarType::Bit,
+                FstVarDirection::Output,
+                None,
+            )?;
+            wires[i] = Some(var);
         }
     }
-    writer.upscope()?;
-    writer.enddefinitions()?;
+    out.up_scope()?;
+    let mut out = out.finish()?;
 
     // Write the initial values
-    writer.begin(SimulationCommand::Dumpvars)?;
+    out.time_change(0)?;
     for wire in wires.iter().flatten() {
-        writer.change_scalar(*wire, Value::V0)?;
+        out.signal_change(*wire, b"0")?;
     }
-    writer.end()?;
 
     let mut t = 0;
     let mut last: u32 = 0;
     for word in acquisition {
         written_clone.fetch_add(1, Ordering::Relaxed);
+        t += 1000 / sample_rate as u64;
+
         if last == word {
             continue;
         }
-        writer.timestamp(t)?;
-        t += 1000 / sample_rate as u64;
 
+        out.time_change(t)?;
         for (i, wire) in wires.iter().enumerate() {
             let value = (word >> i) & 0x1;
             let last_value = (last >> i) & 0x1;
@@ -145,12 +168,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
 
             if let Some(wire) = wire {
-                writer.change_scalar(*wire, if value == 0 { Value::V0 } else { Value::V1 })?;
+                out.signal_change(*wire, if value == 1 { b"1" } else { b"0" })?;
             }
         }
         last = word;
+
+        if written_clone.load(Ordering::Relaxed) % 100_000 == 0 {
+            out.flush()?;
+        }
     }
-    writer.timestamp(t)?;
+    out.time_change(t)?;
+    out.finish()?;
     eprintln!("{}", progress);
     drop(status);
     eprintln!("Done!");
